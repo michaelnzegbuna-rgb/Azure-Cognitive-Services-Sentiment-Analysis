@@ -1,69 +1,73 @@
-# Security & Credential Management Documentation
+# Authentication & Secrets Handling Guide
 
-This document details the security principles, practices, and configuration options implemented to manage credentials, authenticate, and securely interact with Azure Cognitive Services.
-
----
-
-## 🔐 1. Local Development Security
-
-During local development, it is vital to avoid hardcoding credentials (such as API keys and endpoints) directly into the source code to prevent accidental exposure (e.g., committing keys to public GitHub repositories).
-
-### Practices Implemented:
-- **Environment Variables:** The `src/sentiment_analyzer.py` script reads the endpoint and API key from the system environment using Python’s `os.environ.get("AZURE_LANGUAGE_KEY")`.
-- **Git Protection:** If local configuration files (like `.env` or `.json` secret stores) are used, they must be added to a `.gitignore` file to ensure they are never committed to version control.
-- **Credential Fallback:** The script implements a Simulation Mode fallback so that developers can test and grade the script without needing to share or configure live Azure keys.
+This guide walks through how credentials are protected and how authentication to **Azure Cognitive Services** is handled, across three escalating levels of security maturity: local development, centralized secret storage, and fully keyless authentication.
 
 ---
 
-## 🛡️ 2. Production Security: Azure Key Vault
+## 🧪 1. Keeping Secrets Out of Source Code (Local Dev)
 
-In a production cloud environment, credentials should be centralized and managed using a dedicated secrets manager like **Azure Key Vault**. 
+A core rule during development is that no API key or service endpoint should ever be written directly into a source file — doing so risks leaking credentials the moment code is pushed to a public repository.
 
-The main Python script `src/sentiment_analyzer.py` **fully implements** this. If the command line argument `--vault-url` or environment variable `AZURE_KEY_VAULT_URL` is set, the script uses `DefaultAzureCredential` to authenticate to the vault, retrieves the API key, and starts the Language Service client securely.
+**How this is handled here:**
 
-### Code Implemented (Integrating Key Vault in Python):
+- **Reading from the environment.** `src/sentiment_analyzer.py` pulls its endpoint and key at runtime via `os.environ.get("AZURE_LANGUAGE_KEY")`, rather than embedding either value in the script itself.
+- **Keeping secret files out of version control.** Any local secret stores — `.env` files, JSON config files holding keys, etc. — should be listed in `.gitignore` so they're never staged or committed.
+- **A no-credentials test path.** A built-in Simulation Mode lets anyone run and evaluate the script without needing access to a live Azure key at all, which is useful for grading or onboarding new contributors.
+
+---
+
+## 🔑 2. Centralized Secret Storage with Azure Key Vault
+
+Once an application moves to production, credentials shouldn't live in environment variables scattered across machines — they belong in a dedicated secrets management service such as **Azure Key Vault**.
+
+This is already wired up in `src/sentiment_analyzer.py`: when either the `--vault-url` flag or the `AZURE_KEY_VAULT_URL` environment variable is supplied, the script switches to `DefaultAzureCredential` to authenticate against the vault, pulls the API key from there, and uses it to spin up the Language Service client.
+
+**Example — fetching the key from Key Vault:**
+
 ```python
 from azure.keyvault.secrets import SecretClient
 from azure.identity import DefaultAzureCredential
 from azure.ai.textanalytics import TextAnalyticsClient
 from azure.core.credentials import AzureKeyCredential
 
-# 1. Authenticate to Key Vault using Managed Identity
+# Step 1: Authenticate to the vault via Managed Identity
 vault_url = "https://kv-sentiment-prod.vault.azure.net/"
 credential = DefaultAzureCredential()
 secret_client = SecretClient(vault_url=vault_url, credential=credential)
 
-# 2. Retrieve Secret value
+# Step 2: Pull the secret value out of the vault
 api_key = secret_client.get_secret("LanguageServiceApiKey").value
 endpoint = "https://lang-sentiment-learning.cognitiveservices.azure.com/"
 
-# 3. Initialize Client
+# Step 3: Spin up the Text Analytics client
 client = TextAnalyticsClient(endpoint=endpoint, credential=AzureKeyCredential(api_key))
 ```
 
 ---
 
-## 🚀 3. Advanced Security: Managed Identities (Keyless Auth)
+## 🪪 3. Going Keyless: Managed Identity Authentication
 
-The gold standard for cloud engineering security is eliminating API keys entirely. By utilizing **Microsoft Entra ID (formerly Azure Active Directory) Managed Identities**, Azure resources (such as Azure Virtual Machines, App Services, or Functions) can authenticate to the Language Service without any passwords or credentials stored in code or configuration.
+The most secure pattern available is removing API keys from the picture entirely. With **Microsoft Entra ID** (the renamed Azure Active Directory) **Managed Identities**, Azure compute resources — VMs, App Services, Functions, and so on — can authenticate to the Language Service with no stored secret of any kind.
 
-### Implementation steps:
-1. **Enable Managed Identity:** Turn on System-Assigned or User-Assigned Managed Identity on the Azure resource hosting the code.
-2. **Assign Role (RBAC):** Assign the **"Cognitive Services User"** (or specialized Language Service roles) Role-Based Access Control (RBAC) role to the identity on the Language Service resource.
-3. **Use DefaultAzureCredential:** Update the Python code to authenticate directly using `DefaultAzureCredential` from the `azure-identity` library.
+**Setting it up:**
 
-### Keyless Python Code Example:
+1. **Turn on Managed Identity.** Enable either a System-Assigned or User-Assigned identity on whichever Azure resource is hosting the application.
+2. **Grant access via RBAC.** Assign that identity the **"Cognitive Services User"** role (or an equivalent, more granular Language Service role) on the target resource.
+3. **Swap in `DefaultAzureCredential`.** Update the client code to authenticate through `DefaultAzureCredential` from the `azure-identity` package instead of a static key.
+
+**Example — keyless client setup:**
+
 ```python
 from azure.identity import DefaultAzureCredential
 from azure.ai.textanalytics import TextAnalyticsClient
 
-# DefaultAzureCredential automatically discovers environment configurations,
-# Managed Identities, Azure CLI credentials, or VS Code login contexts.
+# DefaultAzureCredential auto-detects the right auth source —
+# a Managed Identity, Azure CLI login, VS Code session, or env config.
 credential = DefaultAzureCredential()
 endpoint = "https://lang-sentiment-learning.cognitiveservices.azure.com/"
 
-# Keyless Client initialization
+# No key required anywhere in this setup
 client = TextAnalyticsClient(endpoint=endpoint, credential=credential)
 ```
 
-This configuration removes keys entirely from environment files, environment variables, and memory, eliminating key rotation overhead and credential leak vulnerabilities.
+With this in place, there's no key sitting in a config file, an environment variable, or in memory — which also means no rotation schedule to maintain and one less way for a credential to leak.
